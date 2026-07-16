@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: ai_platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          load: true
+          tags: ai-platform-capstone:ci
+
+      - name: Run container against real Postgres + Redis
+        run: |
+          docker run -d --name ci-test-container \
+            --network host \
+            -e DATABASE_URL=postgresql://postgres:postgrespassword@localhost:5432/ai_platform \
+            -e REDIS_URL=redis://localhost:6379/0 \
+            -e CELERY_BROKER_URL=redis://localhost:6379/1 \
+            -e CELERY_RESULT_BACKEND=redis://localhost:6379/1 \
+            ai-platform-capstone:ci
+
+      - name: Wait for container to report healthy
+        run: |
+          for i in $(seq 1 15); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' ci-test-container)
+            echo "Health status: $status"
+            if [ "$status" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Container never became healthy"
+          docker logs ci-test-container
+          exit 1
+
+      - name: Show logs
+        if: always()
+        run: docker logs ci-test-container
+
+      - name: Stop container
+        if: always()
+        run: docker stop ci-test-container
