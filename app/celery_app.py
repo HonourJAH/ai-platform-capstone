@@ -6,6 +6,7 @@ celery_app = Celery(
     "ai_platform",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
+    include=["app.services.adapters.image_classifier"],
 )
 
 celery_app.conf.update(

@@ -43,10 +43,14 @@ def run_inference(
 
     try:
         if adapter.is_async:
-            job_id = adapter.enqueue(payload.model_dump())
+            import uuid
+
+            job_id = str(uuid.uuid4())
             job = AsyncJob(id=job_id, user_id=user.id, task_type=payload.task_type)
             session.add(job)
             session.commit()
+
+            adapter.enqueue({**payload.model_dump(), "job_id": job_id})
 
             response = InferenceResponse(
                 task_type=payload.task_type, status="queued", job_id=job_id

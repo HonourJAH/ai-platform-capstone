@@ -6,8 +6,12 @@ WORKDIR /build
 RUN python -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+RUN python3 -c "from torchvision.models import resnet50, ResNet50_Weights; resnet50(weights=ResNet50_Weights.DEFAULT)"
 
 # final stage: copy venv + app code only, no build tools
 FROM python:3.12-slim
@@ -17,6 +21,7 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 WORKDIR /app
 
 COPY --from=builder /venv /venv
+COPY --from=builder /root/.cache/torch /home/appuser/.cache/torch
 ENV PATH="/venv/bin:$PATH"
 
 COPY app ./app
@@ -25,7 +30,7 @@ COPY alembic.ini .
 COPY docker/start.sh .
 RUN chmod +x start.sh
 
-RUN chown -R appuser:appuser /app
+RUN chown -R appuser:appuser /app /home/appuser
 USER appuser
 
 EXPOSE 8000

@@ -23,7 +23,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    command: /venv/bin/celery -A app.celery_app worker --loglevel=info
+    command: /venv/bin/celery -A app.celery_app worker --loglevel=info --pool=solo
     environment:
       DATABASE_URL: postgresql://postgres:postgrespassword@postgres/ai_platform
       REDIS_URL: redis://redis:6379/0

@@ -1,14 +1,25 @@
+import io
 import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict
 
+import httpx
+import torch
+from PIL import Image
 from sqlmodel import Session
+from torchvision.models import resnet50, ResNet50_Weights
 
 from app.celery_app import celery_app
 from app.database import engine
 from app.models import AsyncJob
 from app.services.adapters.base import BaseAdapter
+
+_weights = ResNet50_Weights.DEFAULT
+_model = resnet50(weights=_weights)
+_model.eval()
+_categories = _weights.meta["categories"]
+_preprocess = _weights.transforms()
 
 
 @celery_app.task(bind=True, name="classify_image")
@@ -22,11 +33,30 @@ def classify_image_task(self, job_id: str, image_url: str) -> None:
         session.commit()
 
         try:
-            # INTEGRATION POINT: replace with your Project 2 ResNet50 inference
+            response = httpx.get(
+                image_url,
+                timeout=15.0,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; AIInferencePlatform/1.0)"
+                },
+            )
+            response.raise_for_status()
+            image = Image.open(io.BytesIO(response.content)).convert("RGB")
+
+            tensor = _preprocess(image).unsqueeze(0)
+
+            with torch.no_grad():
+                output = _model(tensor)
+                probs = torch.softmax(output, dim=1)
+
+            class_idx = probs.argmax(dim=1).item()
+            label = _categories[class_idx]
+            confidence = probs[0][class_idx].item()
+
             result = {
-                "label": "placeholder_class",
-                "confidence": 0.0,
-                "image_url": image_url,
+                "label": label,
+                "confidence": confidence,
+                "class_index": class_idx,
             }
 
             job.status = "done"
