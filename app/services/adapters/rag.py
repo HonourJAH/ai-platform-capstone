@@ -84,7 +84,7 @@ class RAGAdapter(BaseAdapter):
         response = httpx.post(
             settings.ollama_url,
             json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
-            timeout=120.0,
+            timeout=180.0,
         )
         response.raise_for_status()
         answer = response.json()["response"]
