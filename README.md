@@ -1,6 +1,6 @@
-# AI Platform (Capstone)
+# AI Inference Platform (Capstone)
 
-A production-shaped platform that unifies four ML services — text classification, image classification, RAG, and LLM chat — behind a single authenticated, rate-limited, observable inference gateway. Built with FastAPI, Celery, Redis, PostgreSQL, Prometheus, and Grafana.
+A production-shaped platform that unifies four ML services — text classification, image classification, RAG, and LLM chat — behind a single authenticated, rate-limited, observable inference gateway. Built with FastAPI, Celery, Redis, PostgreSQL, Qdrant, Prometheus, and Grafana.
 
 ---
 
@@ -32,7 +32,7 @@ GET    /metrics                    →  Prometheus scrape endpoint
 - [Auth Model](#auth-model)
 - [Rate Limiting](#rate-limiting)
 - [Observability](#observability)
-- [Model Adapters](#model-adapters)
+- [Model Adapters — What's Real vs. Placeholder](#model-adapters--whats-real-vs-placeholder)
 - [Project Structure](#project-structure)
 - [Requirements](#requirements)
 - [Getting Started](#getting-started)
@@ -42,6 +42,7 @@ GET    /metrics                    →  Prometheus scrape endpoint
 - [Request & Response Schemas](#request--response-schemas)
 - [Example Usage](#example-usage)
 - [Docker](#docker)
+- [Known Issues & Startup Fragility](#known-issues--startup-fragility)
 - [CI](#ci)
 - [Deployment](#deployment)
 
@@ -84,13 +85,16 @@ A Grafana dashboard is auto-provisioned via `docker-compose` — request rate, p
 
 ---
 
-## Model Adapters
+## Model Adapters — What's Real vs. Placeholder
 
-| Adapter                  | Status                                                                                                                                                                                          |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `text_classification`     | Real, trained scikit-learn model (TF-IDF + Logistic Regression). Fully functional out of the box.                                                                                                 |
-| `image_classification`    | Real, pretrained PyTorch ResNet50 (ImageNet weights via torchvision), run asynchronously through a Celery worker. Downloads the image from the given URL with a `User-Agent` header set, since some hosts block anonymous/bot-like requests. |
-| `rag_query` / `llm_chat`  | Correct request/response shape and a real call to Ollama; the RAG retrieval step is a placeholder pending integration with the Qdrant-backed retrieval from an earlier project.                  |
+This platform's focus is the serving layer — auth, rate limiting, async job handling, observability — not the models themselves. Each adapter is documented honestly below rather than glossed over:
+
+| Adapter                  | Status | Details |
+| ------------------------- | ------ | ------- |
+| `image_classification`    | **Real** | Pretrained PyTorch ResNet50 (ImageNet weights via torchvision), run asynchronously through a Celery worker. Downloads the image from the given URL with a `User-Agent` header set, since some hosts (e.g. Wikimedia) block anonymous/bot-like requests without one. This is the adapter that actually exercises the async job queue, so it's the one that matters most for demonstrating the platform's core design. |
+| `text_classification`     | **Placeholder** | A real, functioning scikit-learn model (TF-IDF + Logistic Regression) — but trained on only 6 hardcoded example sentences at import time, not a real dataset. It *will* run genuine inference and return a genuine label + confidence score, but its accuracy on anything outside that tiny vocabulary is close to a coin flip. This is standing in for a properly trained model from an earlier project; swap the training block for a loaded `joblib` artifact to make it production-quality. |
+| `rag_query`                | **Partial** | Real embedding model (`all-MiniLM-L6-v2` via sentence-transformers), real Qdrant vector search, and a real call to Ollama for generation — the full RAG pipeline genuinely runs. What's missing: this platform has no document-ingestion endpoint, so Qdrant's `documents` collection starts empty. Until it's populated (e.g. by pointing it at an existing document-ingestion pipeline), answers will have no real context to draw from and the model will mostly fall back to "I don't have enough information to answer that." |
+| `llm_chat`                 | **Real, dependency-gated** | A real, direct call to Ollama — no placeholder logic. Requires Ollama running and reachable (`host.docker.internal:11434` from inside Docker) with the configured model pulled; without that, this adapter will fail at request time with a connection error, not silently return a fake answer. |
 
 Every adapter implements a common `BaseAdapter` interface (`run()` for sync, `enqueue()` for async) via a registry keyed by `task_type` — the router never branches on task type directly, so adding a fifth model later means adding one adapter and one registry entry, not touching the route.
 
@@ -120,13 +124,13 @@ ai-platform-capstone/
 │       ├── metrics.py                  — Prometheus counters/histograms + middleware
 │       └── adapters/
 │           ├── base.py                 — BaseAdapter interface
-│           ├── text_classifier.py      — real sklearn model
+│           ├── text_classifier.py      — placeholder sklearn model (see table above)
 │           ├── image_classifier.py     — real ResNet50, Celery task
-│           ├── rag.py                  — Ollama call, retrieval placeholder
-│           ├── llm_chat.py             — Ollama call
+│           ├── rag.py                  — real embed + search + generate, empty collection
+│           ├── llm_chat.py             — real Ollama call
 │           └── __init__.py             — adapter registry
 ├── docker/
-│   ├── Dockerfile                      — multi-stage, non-root, HEALTHCHECK
+│   ├── Dockerfile                      — multi-stage, non-root, HEALTHCHECK, pre-downloads model weights at build time
 │   ├── start.sh                        — migrate then serve
 │   ├── prometheus.yml                  — scrape config
 │   └── grafana/provisioning/           — auto-registered datasource + dashboard
@@ -149,7 +153,7 @@ ai-platform-capstone/
 - Python 3.12+
 - Docker and Docker Compose
 - [Ollama](https://ollama.com) installed and running **on your host machine** (not containerized — see [Docker](#docker)) if you want `rag_query`/`llm_chat` to actually reach a model
-- PostgreSQL and Redis — provided by `docker-compose`, no separate install needed
+- PostgreSQL, Redis, and Qdrant — all provided by `docker-compose`, no separate install needed
 
 ---
 
@@ -176,7 +180,7 @@ Defaults work as-is for local development; change `ADMIN_BOOTSTRAP_KEY` if you w
 docker compose up --build
 ```
 
-This starts: the API (`:8000`), a Celery worker, Postgres, Redis, Prometheus (`:9090`), and Grafana (`:3000`, login `admin`/`admin`). Postgres and Redis are **not** exposed to the host — only reachable inside the Docker network — so a local Postgres/Redis install can run alongside this stack without port conflicts.
+The first build will take a while — it pre-downloads the ResNet50 and sentence-transformer model weights at build time so containers don't hit the network on every start. This starts: the API (`:8000`), a Celery worker, Postgres, Redis, Qdrant (`:6333`), Prometheus (`:9090`), and Grafana (`:3000`, login `admin`/`admin`). Postgres, Redis, and Qdrant are reachable only inside the Docker network by default — Postgres specifically has no host port mapping, so a local Postgres install can run alongside this stack without a port conflict.
 
 ### 4. Bootstrap a user and API key
 
@@ -203,8 +207,13 @@ Copy the `raw_key` from the response — it's shown exactly once.
 | `CELERY_BROKER_URL`      | `redis://localhost:6379/1`                                          | Celery broker (separate Redis DB index)    |
 | `CELERY_RESULT_BACKEND`  | `redis://localhost:6379/1`                                          | Celery result backend                      |
 | `ADMIN_BOOTSTRAP_KEY`    | `change-me-admin-key`                                               | **Change this in any real deployment.**    |
+| `QDRANT_HOST`            | `localhost`                                                          | Qdrant connection                          |
+| `QDRANT_PORT`            | `6333`                                                               | Qdrant connection                          |
+| `RAG_COLLECTION_NAME`    | `documents`                                                          | Qdrant collection queried by `rag_query`   |
+| `OLLAMA_URL`             | `http://host.docker.internal:11434/api/generate`                    | Reaches Ollama on the Docker host           |
+| `OLLAMA_MODEL`           | `llama3.2`                                                           | Must be pulled locally via `ollama pull`   |
 
-> **In Docker**, `docker-compose.yml` overrides these to use the internal service hostnames (`postgres`, `redis`) rather than `localhost` — containers reach each other by Compose service name, not by host loopback.
+> **In Docker**, `docker-compose.yml` overrides these to use the internal service hostnames (`postgres`, `redis`, `qdrant`) rather than `localhost` — containers reach each other by Compose service name, not by host loopback.
 
 ---
 
@@ -277,7 +286,7 @@ Request body is a discriminated union — `task_type` determines which other fie
 {
   "job_id": "1b03fa02-f885-4c72-9ec2-1db3061166ff",
   "status": "done",
-  "result": "{\"label\": \"tabby cat\", \"confidence\": 0.91, \"class_index\": 281}",
+  "result": "{\"label\": \"tiger cat\", \"confidence\": 0.36, \"class_index\": 282}",
   "error": null
 }
 ```
@@ -288,7 +297,7 @@ Returns `404` — deliberately, not `403` — if the job doesn't exist *or* belo
 
 ## Example Usage
 
-### Text classification (sync)
+### Text classification (sync, placeholder model — see table above)
 
 ```
 curl -X POST localhost:8000/inference \
@@ -297,7 +306,7 @@ curl -X POST localhost:8000/inference \
   -d '{"task_type": "text_classification", "text": "this is great"}'
 ```
 
-### Image classification (async — queue then poll)
+### Image classification (async, real model — queue then poll)
 
 ```
 curl -X POST localhost:8000/inference \
@@ -327,11 +336,11 @@ The 11th call on a free-tier key returns `429`.
 
 ### Why Postgres and Redis aren't exposed to the host
 
-`api` and `worker` reach `postgres`/`redis` by Compose service name over the internal Docker network — they never need a host port mapping to do that. Leaving `ports:` off `postgres` specifically avoids a real conflict this project hit during development: a locally-installed Postgres already claiming `5432` on the host blocks the containerized one from binding the same port. Redis is still exposed (`6379`), mainly for local debugging convenience with `redis-cli`.
+`api` and `worker` reach `postgres`/`redis`/`qdrant` by Compose service name over the internal Docker network — they never need a host port mapping to do that. Leaving `ports:` off `postgres` specifically avoids a real conflict this project hit during development: a locally-installed Postgres already claiming `5432` on the host blocks the containerized one from binding the same port. Redis and Qdrant are still exposed (`6379`, `6333`), mainly for local debugging convenience.
 
-### Why the image includes torch/torchvision
+### Why the image includes torch/torchvision and sentence-transformers
 
-`image_classification` runs a real pretrained ResNet50. The Dockerfile installs the CPU-only PyTorch wheel via its dedicated index URL and pre-downloads the ImageNet weights at *build* time (`RUN python3 -c "...resnet50(weights=ResNet50_Weights.DEFAULT)"`), so the image is self-contained and doesn't hit the network on every container start. This does make the image noticeably larger, and `api` carries torch around even though only `worker` uses it — a reasonable simplification for a single-Dockerfile setup; splitting into a lean `api` image and a heavier `worker` image is the natural next step if image size ever becomes a real constraint.
+`image_classification` runs a real pretrained ResNet50; `rag_query` runs a real sentence-transformer for embeddings. The Dockerfile installs the CPU-only PyTorch wheel via its dedicated index URL and pre-downloads both sets of weights at *build* time, so the image is self-contained and doesn't hit the network — or race against a dependency's timeout — on every container start. This does make the image noticeably larger, and `api` carries all of this around even though only `worker` needs the ResNet50 weights — a reasonable simplification for a single-Dockerfile setup; splitting into a lean `api` image and a heavier `worker` image is the natural next step if image size ever becomes a real constraint.
 
 ### Run with Docker Compose
 
@@ -345,7 +354,18 @@ docker compose up --build
 docker compose down
 ```
 
-Add `-v` only when you intentionally want to wipe Postgres/Grafana's persisted data — it deletes the named volumes.
+Add `-v` only when you intentionally want to wipe Postgres/Grafana/Qdrant's persisted data — it deletes the named volumes.
+
+---
+
+## Known Issues & Startup Fragility
+
+Documented honestly rather than hidden, since these were genuine bugs hit and fixed during development and are worth understanding if you extend this project:
+
+- **Redis has no persistent volume.** Any Celery message sitting in the queue when the `redis` container restarts is lost — the corresponding `AsyncJob` row survives in Postgres (which *does* persist), but nothing will ever process it. A job stuck at `"pending"` forever after a restart is this, not a bug in the task itself.
+- **Celery must run with `--pool=solo`.** The default `prefork` pool forks child processes from a main process that has already loaded PyTorch — PyTorch's native threading libraries can leave a lock held by a thread that doesn't exist in the forked child, causing the very first model-using task to hang forever with no error. `solo` avoids forking entirely, at the cost of one task at a time.
+- **The `AsyncJob` row is created and committed *before* the Celery task is dispatched**, not after — dispatching first can let a fast worker start the task before its own database row exists yet, causing it to silently no-op.
+- **A single adapter's import-time failure can take down unrelated adapters.** All four adapters are imported together as one package; an unhandled exception during one adapter's module-level setup (e.g. a slow external service) prevents the *entire* package from importing, deregistering every other adapter's Celery task in the process. `rag.py`'s Qdrant setup specifically catches and logs rather than raising, for this reason — worth applying the same pattern to any adapter with a network call at import time.
 
 ---
 
@@ -362,7 +382,8 @@ GitHub Actions runs on every push/PR to `main`:
 
 - Web service: this repo's `docker/Dockerfile`
 - Managed Postgres and managed Key-Value (Redis-compatible) add-ons
-- A second worker-type service running `celery -A app.celery_app worker` against the same Redis instance
+- A second worker-type service running `celery -A app.celery_app worker --pool=solo` against the same Redis instance
+- A managed or self-hosted Qdrant instance for `rag_query`
 
 Render's free/starter tiers don't provide a place to run Prometheus and Grafana as long-lived scrapers, so the observability stack runs locally via `docker-compose`, pointed at the deployed Render URL — a central-Prometheus-scraping-remote-services pattern that's common in real deployments with more services than dashboards.
 

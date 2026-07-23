@@ -11,13 +11,17 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       ADMIN_BOOTSTRAP_KEY: ${ADMIN_BOOTSTRAP_KEY:-change-me-admin-key}
+      QDRANT_HOST: qdrant
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
+      qdrant:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
 
   worker:
     build:
@@ -29,13 +33,17 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      QDRANT_HOST: qdrant
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
+      qdrant:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
 
   postgres:
     image: postgres:16
@@ -52,8 +60,23 @@ services:
 
   redis:
     image: redis:7
+    command: redis-server --appendonly yes
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
 
   prometheus:
     image: prom/prometheus:latest
@@ -79,3 +102,5 @@ services:
 volumes:
   postgres_data:
   grafana_data:
+  qdrant_data:
+  redis_data:
