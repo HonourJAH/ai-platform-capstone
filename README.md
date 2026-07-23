@@ -93,7 +93,7 @@ This platform's focus is the serving layer — auth, rate limiting, async job ha
 | ------------------------- | ------ | ------- |
 | `image_classification`    | **Real** | Pretrained PyTorch ResNet50 (ImageNet weights via torchvision), run asynchronously through a Celery worker. Downloads the image from the given URL with a `User-Agent` header set, since some hosts (e.g. Wikimedia) block anonymous/bot-like requests without one. This is the adapter that actually exercises the async job queue, so it's the one that matters most for demonstrating the platform's core design. |
 | `text_classification`     | **Placeholder** | A real, functioning scikit-learn model (TF-IDF + Logistic Regression) — but trained on only 6 hardcoded example sentences at import time, not a real dataset. It *will* run genuine inference and return a genuine label + confidence score, but its accuracy on anything outside that tiny vocabulary is close to a coin flip. This is standing in for a properly trained model from an earlier project; swap the training block for a loaded `joblib` artifact to make it production-quality. |
-| `rag_query`                | **Partial** | Real embedding model (`all-MiniLM-L6-v2` via sentence-transformers), real Qdrant vector search, and a real call to Ollama for generation — the full RAG pipeline genuinely runs. What's missing: this platform has no document-ingestion endpoint, so Qdrant's `documents` collection starts empty. Until it's populated (e.g. by pointing it at an existing document-ingestion pipeline), answers will have no real context to draw from and the model will mostly fall back to "I don't have enough information to answer that." |
+| `rag_query`                | **Partial** | Real embedding model (`all-MiniLM-L6-v2` via sentence-transformers), real Qdrant vector search, and a real call to Ollama for generation — the full RAG pipeline genuinely runs end-to-end. What's missing: this platform has no document-ingestion endpoint, so Qdrant's `documents` collection starts empty. Until it's populated (e.g. by pointing it at an existing document-ingestion pipeline), answers will have no real context to draw from and the model will mostly fall back to "I don't have enough information to answer that." |
 | `llm_chat`                 | **Real, dependency-gated** | A real, direct call to Ollama — no placeholder logic. Requires Ollama running and reachable (`host.docker.internal:11434` from inside Docker) with the configured model pulled; without that, this adapter will fail at request time with a connection error, not silently return a fake answer. |
 
 Every adapter implements a common `BaseAdapter` interface (`run()` for sync, `enqueue()` for async) via a registry keyed by `task_type` — the router never branches on task type directly, so adding a fifth model later means adding one adapter and one registry entry, not touching the route.
@@ -106,7 +106,7 @@ Every adapter implements a common `BaseAdapter` interface (`run()` for sync, `en
 ai-platform-capstone/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                     — GitHub Actions CI: tests + real Postgres/Redis container health check
+│       └── ci.yml                     — GitHub Actions CI: tests (with torch/torchvision) + real Postgres/Redis container health check
 ├── alembic/
 │   ├── env.py                          — points Alembic at SQLModel metadata + app settings
 │   └── versions/                       — migration history
@@ -125,8 +125,8 @@ ai-platform-capstone/
 │       └── adapters/
 │           ├── base.py                 — BaseAdapter interface
 │           ├── text_classifier.py      — placeholder sklearn model (see table above)
-│           ├── image_classifier.py     — real ResNet50, Celery task
-│           ├── rag.py                  — real embed + search + generate, empty collection
+│           ├── image_classifier.py     — real ResNet50, Celery task, structured logging
+│           ├── rag.py                  — real embed + Qdrant search + Ollama generate
 │           ├── llm_chat.py             — real Ollama call
 │           └── __init__.py             — adapter registry
 ├── docker/
@@ -172,7 +172,7 @@ cd ai-platform-capstone
 cp .env.example .env
 ```
 
-Defaults work as-is for local development; change `ADMIN_BOOTSTRAP_KEY` if you want a real secret rather than the placeholder.
+Defaults work as-is for local development; change `ADMIN_BOOTSTRAP_KEY` if you want a real secret rather than the placeholder. Note: values set in `docker-compose.yml`'s `environment:` blocks take precedence over `.env` when running via Compose — see [Environment Variables](#environment-variables) for the full precedence order.
 
 ### 3. Start the full stack
 
@@ -186,12 +186,12 @@ The first build will take a while — it pre-downloads the ResNet50 and sentence
 
 ```
 curl -X POST localhost:8000/admin/users \
-  -H "x-admin-key: change-me-admin-key" \
+  -H "x-admin-key: admin-key" \
   -H "Content-Type: application/json" \
   -d '{"email": "you@example.com", "tier": "free"}'
 
 curl -X POST localhost:8000/admin/users/1/keys \
-  -H "x-admin-key: change-me-admin-key"
+  -H "x-admin-key: admin-key"
 ```
 
 Copy the `raw_key` from the response — it's shown exactly once.
@@ -206,14 +206,14 @@ Copy the `raw_key` from the response — it's shown exactly once.
 | `REDIS_URL`              | `redis://localhost:6379/0`                                          | Rate limiter's Redis DB                    |
 | `CELERY_BROKER_URL`      | `redis://localhost:6379/1`                                          | Celery broker (separate Redis DB index)    |
 | `CELERY_RESULT_BACKEND`  | `redis://localhost:6379/1`                                          | Celery result backend                      |
-| `ADMIN_BOOTSTRAP_KEY`    | `change-me-admin-key`                                               | **Change this in any real deployment.**    |
+| `ADMIN_BOOTSTRAP_KEY`    | `admin-key`                                               | **Change this in any real deployment.**    |
 | `QDRANT_HOST`            | `localhost`                                                          | Qdrant connection                          |
 | `QDRANT_PORT`            | `6333`                                                               | Qdrant connection                          |
 | `RAG_COLLECTION_NAME`    | `documents`                                                          | Qdrant collection queried by `rag_query`   |
 | `OLLAMA_URL`             | `http://host.docker.internal:11434/api/generate`                    | Reaches Ollama on the Docker host           |
 | `OLLAMA_MODEL`           | `llama3.2`                                                           | Must be pulled locally via `ollama pull`   |
 
-> **In Docker**, `docker-compose.yml` overrides these to use the internal service hostnames (`postgres`, `redis`, `qdrant`) rather than `localhost` — containers reach each other by Compose service name, not by host loopback.
+**Precedence when running via `docker compose`**: an actual environment variable set on your host (or via `${VAR:-default}` in `docker-compose.yml` itself) always wins over the Python-level default in `app/config.py`. `docker-compose.yml` explicitly sets each of these under every service's `environment:` block, so editing `app/config.py`'s defaults alone has no effect when running through Compose — change `.env` (or the compose file directly) instead.
 
 ---
 
@@ -221,7 +221,21 @@ Copy the `raw_key` from the response — it's shown exactly once.
 
 Nothing here requires a live Postgres or Redis — every dependency is swapped for an in-memory SQLite DB and `fakeredis` via FastAPI's `dependency_overrides`, and the Celery dispatch is mocked for the async image-classification path.
 
+### Option A — inside the built Docker image (recommended)
+
+The production image doesn't ship torch/torchvision/sentence-transformers separately from the app itself, and the `image_classification`/`rag_query` adapters import them at module load time — so importing *any* part of the app (including for tests) pulls in the full ML stack. Rather than installing several hundred MB of ML dependencies into your local machine just to run tests, run them inside the already-built image instead, mounting your local `tests/` folder in (it isn't baked into the production image on purpose):
+
 ```
+docker compose run --rm --user root -v "$(pwd)/tests:/app/tests" api \
+  sh -c "pip install pytest fakeredis lupa pytest-asyncio && pytest tests/ -v"
+```
+
+`--user root` is needed only because the image drops to a non-root user by default (a deliberate security hardening choice) — this override is safe for a throwaway `--rm` container.
+
+### Option B — locally
+
+```
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
@@ -276,7 +290,7 @@ Request body is a discriminated union — `task_type` determines which other fie
   "task_type": "image_classification",
   "status": "queued",
   "result": null,
-  "job_id": "1b03fa02-f885-4c72-9ec2-1db3061166ff"
+  "job_id": "5f6d19b3-5ae6-4ad5-bc6d-248ba5766879"
 }
 ```
 
@@ -284,7 +298,7 @@ Request body is a discriminated union — `task_type` determines which other fie
 
 ```
 {
-  "job_id": "1b03fa02-f885-4c72-9ec2-1db3061166ff",
+  "job_id": "5f6d19b3-5ae6-4ad5-bc6d-248ba5766879",
   "status": "done",
   "result": "{\"label\": \"tiger cat\", \"confidence\": 0.36, \"class_index\": 282}",
   "error": null
@@ -342,6 +356,10 @@ The 11th call on a free-tier key returns `429`.
 
 `image_classification` runs a real pretrained ResNet50; `rag_query` runs a real sentence-transformer for embeddings. The Dockerfile installs the CPU-only PyTorch wheel via its dedicated index URL and pre-downloads both sets of weights at *build* time, so the image is self-contained and doesn't hit the network — or race against a dependency's timeout — on every container start. This does make the image noticeably larger, and `api` carries all of this around even though only `worker` needs the ResNet50 weights — a reasonable simplification for a single-Dockerfile setup; splitting into a lean `api` image and a heavier `worker` image is the natural next step if image size ever becomes a real constraint.
 
+### Redis persistence
+
+Redis runs with `--appendonly yes` and a named volume (`redis_data`), so a queued-but-unprocessed Celery message survives a container restart instead of silently vanishing — see [Known Issues](#known-issues--startup-fragility) for the failure mode this specifically fixes.
+
 ### Run with Docker Compose
 
 ```
@@ -354,7 +372,7 @@ docker compose up --build
 docker compose down
 ```
 
-Add `-v` only when you intentionally want to wipe Postgres/Grafana/Qdrant's persisted data — it deletes the named volumes.
+Add `-v` only when you intentionally want to wipe Postgres/Grafana/Qdrant/Redis's persisted data — it deletes the named volumes.
 
 ---
 
@@ -362,10 +380,11 @@ Add `-v` only when you intentionally want to wipe Postgres/Grafana/Qdrant's pers
 
 Documented honestly rather than hidden, since these were genuine bugs hit and fixed during development and are worth understanding if you extend this project:
 
-- **Redis has no persistent volume.** Any Celery message sitting in the queue when the `redis` container restarts is lost — the corresponding `AsyncJob` row survives in Postgres (which *does* persist), but nothing will ever process it. A job stuck at `"pending"` forever after a restart is this, not a bug in the task itself.
 - **Celery must run with `--pool=solo`.** The default `prefork` pool forks child processes from a main process that has already loaded PyTorch — PyTorch's native threading libraries can leave a lock held by a thread that doesn't exist in the forked child, causing the very first model-using task to hang forever with no error. `solo` avoids forking entirely, at the cost of one task at a time.
 - **The `AsyncJob` row is created and committed *before* the Celery task is dispatched**, not after — dispatching first can let a fast worker start the task before its own database row exists yet, causing it to silently no-op.
+- **`enqueue()` never generates its own job ID.** It strictly uses the `job_id` passed in from the route (which already created and committed the corresponding `AsyncJob` row) and raises immediately if one isn't provided. An earlier version generated its own UUID internally, which meant the ID returned to the client and the ID the Celery task actually looked up in the database could silently diverge — producing jobs that appeared to succeed (in the worker's logs) while the client polled a different, permanently-`"pending"` row forever. If you extend this pattern to a new async adapter, keep job ID generation solely in the route.
 - **A single adapter's import-time failure can take down unrelated adapters.** All four adapters are imported together as one package; an unhandled exception during one adapter's module-level setup (e.g. a slow external service) prevents the *entire* package from importing, deregistering every other adapter's Celery task in the process. `rag.py`'s Qdrant setup specifically catches and logs rather than raising, for this reason — worth applying the same pattern to any adapter with a network call at import time.
+- **Give every external dependency a real healthcheck, not just `depends_on`.** `depends_on` alone only waits for a container to *start*, not for the service inside it to actually be ready to accept connections — this caused real startup-ordering races against both Postgres and Qdrant during development. Every external service in `docker-compose.yml` now has an explicit `healthcheck:`, and `api`/`worker` wait on `condition: service_healthy`, not just `service_started`.
 
 ---
 
@@ -373,8 +392,8 @@ Documented honestly rather than hidden, since these were genuine bugs hit and fi
 
 GitHub Actions runs on every push/PR to `main`:
 
-1. Installs dependencies, runs the full test suite against SQLite + `fakeredis`.
-2. Builds the Docker image, spins up **real** Postgres and Redis as GitHub Actions `services:`, runs the container against them with `--network host`, and polls the container's own `HEALTHCHECK` status until it reports `healthy` — verifying migrations and startup genuinely succeed against a live database, not just that the image builds.
+1. **`test`** — installs the CPU-only torch/torchvision wheel plus `requirements-dev.txt`, then runs the full test suite against SQLite + `fakeredis`. Torch has to be installed explicitly here since it's normally only ever installed inside the Docker build, not via `requirements.txt`.
+2. **`build`** (depends on `test` passing) — builds the Docker image, spins up **real** Postgres and Redis as GitHub Actions `services:`, runs the container against them with `--network host`, and polls the container's own `HEALTHCHECK` status until it reports `healthy` — verifying migrations and startup genuinely succeed against a live database, not just that the image builds.
 
 ---
 
