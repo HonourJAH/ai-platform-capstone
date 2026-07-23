@@ -20,7 +20,7 @@ def test_image_classification_returns_queued_job(client, monkeypatch):
     monkeypatch.setattr(
         ADAPTER_REGISTRY["image_classification"],
         "enqueue",
-        lambda payload: "fake-job-id-123",
+        lambda payload: payload["job_id"],
     )
 
     resp = client.post(
@@ -35,7 +35,7 @@ def test_image_classification_returns_queued_job(client, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "queued"
-    assert body["job_id"] == "fake-job-id-123"
+    assert body["job_id"] is not None
 
 
 def test_job_status_endpoint_returns_job_for_owner(client, monkeypatch):
@@ -43,10 +43,10 @@ def test_job_status_endpoint_returns_job_for_owner(client, monkeypatch):
     monkeypatch.setattr(
         ADAPTER_REGISTRY["image_classification"],
         "enqueue",
-        lambda payload: "fake-job-id-456",
+        lambda payload: payload["job_id"],
     )
 
-    client.post(
+    resp = client.post(
         "/inference",
         json={
             "task_type": "image_classification",
@@ -54,8 +54,9 @@ def test_job_status_endpoint_returns_job_for_owner(client, monkeypatch):
         },
         headers={"x-api-key": raw_key},
     )
+    job_id = resp.json()["job_id"]
 
-    resp = client.get("/inference/jobs/fake-job-id-456", headers={"x-api-key": raw_key})
+    resp = client.get(f"/inference/jobs/{job_id}", headers={"x-api-key": raw_key})
     assert resp.status_code == 200
     assert resp.json()["status"] == "pending"
 
@@ -77,9 +78,9 @@ def test_job_status_endpoint_rejects_other_users_jobs(client, monkeypatch):
     monkeypatch.setattr(
         ADAPTER_REGISTRY["image_classification"],
         "enqueue",
-        lambda payload: "fake-job-id-789",
+        lambda payload: payload["job_id"],
     )
-    client.post(
+    resp = client.post(
         "/inference",
         json={
             "task_type": "image_classification",
@@ -87,8 +88,8 @@ def test_job_status_endpoint_rejects_other_users_jobs(client, monkeypatch):
         },
         headers={"x-api-key": raw_key_a},
     )
+    job_id = resp.json()["job_id"]
 
-    resp = client.get(
-        "/inference/jobs/fake-job-id-789", headers={"x-api-key": raw_key_b}
-    )
+    # user B tries to read user A's job
+    resp = client.get(f"/inference/jobs/{job_id}", headers={"x-api-key": raw_key_b})
     assert resp.status_code == 404
